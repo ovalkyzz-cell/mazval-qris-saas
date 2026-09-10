@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 5000;
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(securityHeaders);
 app.use(hpp());
-app.use(cors({ origin: process.env.APP_URL || '*', credentials: true }));
+app.use(cors({ origin: true, credentials: true }));
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
@@ -30,7 +30,7 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'mazval-secret-key',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: false, httpOnly: true, maxAge: 24 * 60 * 60 * 1000, sameSite: 'lax' },
+  cookie: { secure: true, httpOnly: true, maxAge: 24 * 60 * 60 * 1000, sameSite: 'none' },
   name: 'qris_session'
 }));
 
