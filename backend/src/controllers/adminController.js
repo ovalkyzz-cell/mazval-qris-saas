@@ -1,47 +1,29 @@
 const { pool } = require('../config/database');
 
 const adminController = {
-  // Dashboard stats
   getDashboard: async (req, res) => {
     try {
       const stats = {};
+      const q = async (sql, params) => (await pool.query(sql, params)).rows[0];
 
-      const usersResult = pool.query('SELECT COUNT(*) as count FROM users');
-      stats.totalUsers = usersResult.rows[0]?.count || 0;
-
-      const resellerResult = pool.query("SELECT COUNT(*) as count FROM resellers WHERE status = 'active'");
-      stats.totalResellers = resellerResult.rows[0]?.count || 0;
+      stats.totalUsers = (await q('SELECT COUNT(*) as count FROM users'))?.count || 0;
+      stats.totalResellers = (await q("SELECT COUNT(*) as count FROM resellers WHERE status = 'active'"))?.count || 0;
 
       const today = new Date().toISOString().split('T')[0];
-      const txTodayResult = pool.query('SELECT COUNT(*) as count FROM transactions WHERE date(created_at) = ?', [today]);
-      stats.transactionsToday = txTodayResult.rows[0]?.count || 0;
-
-      const successResult = pool.query("SELECT COUNT(*) as count FROM transactions WHERE date(created_at) = ? AND status = 'success'", [today]);
-      stats.successfulPayments = successResult.rows[0]?.count || 0;
-
-      const pendingResult = pool.query("SELECT COUNT(*) as count FROM transactions WHERE status = 'pending'");
-      stats.pendingPayments = pendingResult.rows[0]?.count || 0;
-
-      const failedResult = pool.query("SELECT COUNT(*) as count FROM transactions WHERE date(created_at) = ? AND status = 'failed'", [today]);
-      stats.failedPayments = failedResult.rows[0]?.count || 0;
-
-      const revenueResult = pool.query("SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE status = 'success'");
-      stats.totalRevenue = revenueResult.rows[0]?.total || 0;
-
-      const subResult = pool.query("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'active'");
-      stats.activeSubscriptions = subResult.rows[0]?.count || 0;
+      stats.transactionsToday = (await q('SELECT COUNT(*) as count FROM transactions WHERE DATE(created_at) = $1', [today]))?.count || 0;
+      stats.successfulPayments = (await q("SELECT COUNT(*) as count FROM transactions WHERE DATE(created_at) = $1 AND status = 'success'", [today]))?.count || 0;
+      stats.pendingPayments = (await q("SELECT COUNT(*) as count FROM transactions WHERE status = 'pending'"))?.count || 0;
+      stats.failedPayments = (await q("SELECT COUNT(*) as count FROM transactions WHERE DATE(created_at) = $1 AND status = 'failed'", [today]))?.count || 0;
+      stats.totalRevenue = (await q("SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE status = 'success'"))?.total || 0;
+      stats.activeSubscriptions = (await q("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'active'"))?.count || 0;
 
       res.json({ success: true, data: stats });
     } catch (error) {
       console.error('Admin dashboard error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Get all users
   getUsers: async (req, res) => {
     try {
       const page = parseInt(req.query.page) || 1;
@@ -55,117 +37,65 @@ const adminController = {
       const countParams = [];
 
       if (search) {
-        query += ` WHERE u.email LIKE ? OR u.name LIKE ?`;
-        countQuery += ` WHERE u.email LIKE ? OR u.name LIKE ?`;
-        params.push(`%${search}%`, `%${search}%`);
-        countParams.push(`%${search}%`, `%${search}%`);
+        query += ` WHERE u.email ILIKE $1 OR u.name ILIKE $1`;
+        countQuery += ` WHERE u.email ILIKE $1 OR u.name ILIKE $1`;
+        params.push(`%${search}%`);
+        countParams.push(`%${search}%`);
       }
 
-      query += ` ORDER BY u.created_at DESC LIMIT ? OFFSET ?`;
+      query += ` ORDER BY u.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
       params.push(limit, offset);
 
-      const result = pool.query(query, params);
-      const countResult = pool.query(countQuery, countParams);
+      const result = await pool.query(query, params);
+      const countResult = await pool.query(countQuery, countParams);
 
-      res.json({
-        success: true,
-        data: {
-          users: result.rows,
-          total: countResult.rows[0]?.count || 0,
-          page,
-          limit
-        }
-      });
+      res.json({ success: true, data: { users: result.rows, total: parseInt(countResult.rows[0].count), page, limit } });
     } catch (error) {
       console.error('Get users error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Update user status
   updateUserStatus: async (req, res) => {
     try {
       const { userId } = req.params;
       const { status } = req.body;
-
       if (!['active', 'banned', 'suspended'].includes(status)) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'INVALID_STATUS', message: 'Invalid status' }
-        });
+        return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Invalid status' } });
       }
-
-      pool.query('UPDATE users SET status = ?, updated_at = datetime(\'now\') WHERE id = ?', [status, userId]);
-
-      const action = status === 'banned' ? 'BAN_USER' : status === 'suspended' ? 'SUSPEND_USER' : 'ACTIVATE_USER';
-      pool.query(
-        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, ?, 'user', ?, ?, ?)",
-        [req.session.userId, 'ADMIN', action, userId, JSON.stringify({ newStatus: status }), req.ip]
-      );
-
+      await pool.query('UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2', [status, userId]);
+      await pool.query("INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES ($1, 'ADMIN', $2, 'user', $3, $4, $5)",
+        [req.session.userId, status === 'banned' ? 'BAN_USER' : status === 'suspended' ? 'SUSPEND_USER' : 'ACTIVATE_USER', userId, JSON.stringify({ newStatus: status }), req.ip]);
       res.json({ success: true, message: `User ${status}` });
     } catch (error) {
       console.error('Update user status error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Get resellers
   getResellers: async (req, res) => {
     try {
-      const result = pool.query(
-        `SELECT r.*, u.email, u.name, u.status as user_status
-         FROM resellers r
-         JOIN users u ON r.user_id = u.id
-         ORDER BY r.created_at DESC`
-      );
-
+      const result = await pool.query('SELECT r.*, u.email, u.name, u.status as user_status FROM resellers r JOIN users u ON r.user_id = u.id ORDER BY r.created_at DESC');
       res.json({ success: true, data: result.rows });
     } catch (error) {
       console.error('Get resellers error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Update reseller
   updateReseller: async (req, res) => {
     try {
       const { resellerId } = req.params;
       const { status, custom_rate_limit } = req.body;
-
-      if (status) {
-        pool.query('UPDATE resellers SET status = ?, updated_at = datetime(\'now\') WHERE id = ?', [status, resellerId]);
-      }
-
-      if (custom_rate_limit !== undefined) {
-        pool.query('UPDATE resellers SET custom_rate_limit = ?, updated_at = datetime(\'now\') WHERE id = ?', [custom_rate_limit, resellerId]);
-      }
-
-      pool.query(
-        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, 'UPDATE_RESELLER', 'reseller', ?, ?, ?)",
-        [req.session.userId, 'ADMIN', resellerId, JSON.stringify({ status, custom_rate_limit }), req.ip]
-      );
-
+      if (status) await pool.query('UPDATE resellers SET status = $1, updated_at = NOW() WHERE id = $2', [status, resellerId]);
+      if (custom_rate_limit !== undefined) await pool.query('UPDATE resellers SET custom_rate_limit = $1, updated_at = NOW() WHERE id = $2', [custom_rate_limit, resellerId]);
       res.json({ success: true, message: 'Reseller updated' });
     } catch (error) {
       console.error('Update reseller error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Get all transactions
   getTransactions: async (req, res) => {
     try {
       const page = parseInt(req.query.page) || 1;
@@ -179,167 +109,101 @@ const adminController = {
       const countParams = [];
 
       if (status) {
-        query += ` WHERE t.status = ?`;
-        countQuery += ` WHERE t.status = ?`;
+        query += ` WHERE t.status = $1`;
+        countQuery += ` WHERE t.status = $1`;
         params.push(status);
         countParams.push(status);
       }
 
-      query += ` ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
+      query += ` ORDER BY t.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
       params.push(limit, offset);
 
-      const result = pool.query(query, params);
-      const countResult = pool.query(countQuery, countParams);
+      const result = await pool.query(query, params);
+      const countResult = await pool.query(countQuery, countParams);
 
-      res.json({
-        success: true,
-        data: {
-          transactions: result.rows,
-          total: countResult.rows[0]?.count || 0,
-          page,
-          limit
-        }
-      });
+      res.json({ success: true, data: { transactions: result.rows, total: parseInt(countResult.rows[0].count), page, limit } });
     } catch (error) {
       console.error('Get transactions error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Update user plan
   updateUserPlan: async (req, res) => {
     try {
       const { userId } = req.params;
       const { plan_slug, custom_rate_limit } = req.body;
+      const planResult = await pool.query('SELECT id FROM plans WHERE slug = $1', [plan_slug]);
+      if (planResult.rows.length === 0) return res.status(400).json({ success: false, error: { code: 'INVALID_PLAN', message: 'Invalid plan' } });
 
-      const planResult = pool.query('SELECT id FROM plans WHERE slug = ?', [plan_slug]);
-      if (planResult.rows.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'INVALID_PLAN', message: 'Invalid plan' }
-        });
-      }
-
-      const existing = pool.query('SELECT id FROM subscriptions WHERE user_id = ?', [userId]);
-      if (existing.rows.length > 0) {
-        pool.query(
-          "UPDATE subscriptions SET plan_id = ?, status = 'active', started_at = datetime('now'), expired_at = datetime('now', '+30 days'), custom_rate_limit = ?, updated_at = datetime('now') WHERE user_id = ?",
-          [planResult.rows[0].id, custom_rate_limit || null, userId]
-        );
-      } else {
-        pool.query(
-          "INSERT INTO subscriptions (user_id, plan_id, status, started_at, expired_at, custom_rate_limit) VALUES (?, ?, 'active', datetime('now'), datetime('now', '+30 days'), ?)",
-          [userId, planResult.rows[0].id, custom_rate_limit || null]
-        );
-      }
-
-      pool.query(
-        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, 'CHANGE_PLAN', 'user', ?, ?, ?)",
-        [req.session.userId, 'ADMIN', userId, JSON.stringify({ plan_slug, custom_rate_limit }), req.ip]
+      await pool.query(
+        `INSERT INTO subscriptions (user_id, plan_id, status, started_at, expired_at, custom_rate_limit)
+         VALUES ($1, $2, 'active', NOW(), NOW() + INTERVAL '30 days', $3)
+         ON CONFLICT (user_id) DO UPDATE SET plan_id = $2, status = 'active', started_at = NOW(), expired_at = NOW() + INTERVAL '30 days', custom_rate_limit = $3, updated_at = NOW()`,
+        [userId, planResult.rows[0].id, custom_rate_limit || null]
       );
+
+      await pool.query("INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES ($1, 'ADMIN', 'CHANGE_PLAN', 'user', $2, $3, $4)",
+        [req.session.userId, userId, JSON.stringify({ plan_slug, custom_rate_limit }), req.ip]);
 
       res.json({ success: true, message: 'Plan updated' });
     } catch (error) {
       console.error('Update plan error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Get audit logs
   getAuditLogs: async (req, res) => {
     try {
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 50;
       const offset = (page - 1) * limit;
 
-      const result = pool.query(
-        `SELECT a.*, u.email as actor_email, u.name as actor_name
-         FROM audit_logs a
-         LEFT JOIN users u ON a.actor_id = u.id
-         ORDER BY a.created_at DESC
-         LIMIT ? OFFSET ?`,
+      const result = await pool.query(
+        `SELECT a.*, u.email as actor_email, u.name as actor_name FROM audit_logs a LEFT JOIN users u ON a.actor_id = u.id ORDER BY a.created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       );
+      const countResult = await pool.query('SELECT COUNT(*) FROM audit_logs');
 
-      const countResult = pool.query('SELECT COUNT(*) as count FROM audit_logs');
-
-      res.json({
-        success: true,
-        data: {
-          logs: result.rows,
-          total: countResult.rows[0]?.count || 0,
-          page,
-          limit
-        }
-      });
+      res.json({ success: true, data: { logs: result.rows, total: parseInt(countResult.rows[0].count), page, limit } });
     } catch (error) {
       console.error('Get audit logs error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Get plans
   getPlans: async (req, res) => {
     try {
-      const result = pool.query('SELECT * FROM plans ORDER BY display_order');
+      const result = await pool.query('SELECT * FROM plans ORDER BY display_order');
       res.json({ success: true, data: result.rows });
     } catch (error) {
       console.error('Get plans error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   },
 
-  // Update plan
   updatePlan: async (req, res) => {
     try {
       const { planId } = req.params;
-      const { price, daily_limit, rate_limit, features, badge, marketing_text, is_active } = req.body;
-
+      const { price, daily_limit, rate_limit, badge, marketing_text, is_active } = req.body;
       const updates = [];
       const values = [];
+      let i = 1;
 
-      if (price !== undefined) { updates.push('price = ?'); values.push(price); }
-      if (daily_limit !== undefined) { updates.push('daily_limit = ?'); values.push(daily_limit); }
-      if (rate_limit !== undefined) { updates.push('rate_limit = ?'); values.push(rate_limit); }
-      if (features !== undefined) { updates.push('features = ?'); values.push(JSON.stringify(features)); }
-      if (badge !== undefined) { updates.push('badge = ?'); values.push(badge); }
-      if (marketing_text !== undefined) { updates.push('marketing_text = ?'); values.push(marketing_text); }
-      if (is_active !== undefined) { updates.push('is_active = ?'); values.push(is_active ? 1 : 0); }
+      if (price !== undefined) { updates.push(`price = $${i}`); values.push(price); i++; }
+      if (daily_limit !== undefined) { updates.push(`daily_limit = $${i}`); values.push(daily_limit); i++; }
+      if (rate_limit !== undefined) { updates.push(`rate_limit = $${i}`); values.push(rate_limit); i++; }
+      if (badge !== undefined) { updates.push(`badge = $${i}`); values.push(badge); i++; }
+      if (marketing_text !== undefined) { updates.push(`marketing_text = $${i}`); values.push(marketing_text); i++; }
+      if (is_active !== undefined) { updates.push(`is_active = $${i}`); values.push(is_active); i++; }
 
-      if (updates.length === 0) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'NO_UPDATES', message: 'No updates provided' }
-        });
-      }
+      if (updates.length === 0) return res.status(400).json({ success: false, error: { code: 'NO_UPDATES', message: 'No updates provided' } });
 
       values.push(planId);
-      pool.query(`UPDATE plans SET ${updates.join(', ')} WHERE id = ?`, values);
-
-      pool.query(
-        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, 'UPDATE_PLAN', 'plan', ?, ?, ?)",
-        [req.session.userId, 'ADMIN', planId, JSON.stringify(req.body), req.ip]
-      );
-
+      await pool.query(`UPDATE plans SET ${updates.join(', ')} WHERE id = $${i}`, values);
       res.json({ success: true, message: 'Plan updated' });
     } catch (error) {
       console.error('Update plan error:', error);
-      res.status(500).json({
-        success: false,
-        error: { code: 'SERVER_ERROR', message: 'Internal server error' }
-      });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Internal server error' } });
     }
   }
 };
