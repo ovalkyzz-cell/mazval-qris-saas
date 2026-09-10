@@ -6,77 +6,30 @@ const adminController = {
     try {
       const stats = {};
 
-      // Total users
-      const usersResult = await pool.query('SELECT COUNT(*) FROM users');
-      stats.totalUsers = parseInt(usersResult.rows[0].count);
+      const usersResult = pool.query('SELECT COUNT(*) as count FROM users');
+      stats.totalUsers = usersResult.rows[0]?.count || 0;
 
-      // Online users (heartbeat in last 30 seconds)
-      const onlineResult = await pool.query(
-        `SELECT COUNT(*) FROM users 
-         WHERE last_login > NOW() - INTERVAL '30 seconds'`
-      );
-      stats.onlineUsers = parseInt(onlineResult.rows[0].count);
-      stats.offlineUsers = stats.totalUsers - stats.onlineUsers;
+      const resellerResult = pool.query("SELECT COUNT(*) as count FROM resellers WHERE status = 'active'");
+      stats.totalResellers = resellerResult.rows[0]?.count || 0;
 
-      // Total resellers
-      const resellerResult = await pool.query(
-        "SELECT COUNT(*) FROM resellers WHERE status = 'active'"
-      );
-      stats.totalResellers = parseInt(resellerResult.rows[0].count);
-
-      // Transactions today
       const today = new Date().toISOString().split('T')[0];
-      const txTodayResult = await pool.query(
-        'SELECT COUNT(*) FROM transactions WHERE DATE(created_at) = $1',
-        [today]
-      );
-      stats.transactionsToday = parseInt(txTodayResult.rows[0].count);
+      const txTodayResult = pool.query('SELECT COUNT(*) as count FROM transactions WHERE date(created_at) = ?', [today]);
+      stats.transactionsToday = txTodayResult.rows[0]?.count || 0;
 
-      // Successful payments today
-      const successResult = await pool.query(
-        "SELECT COUNT(*) FROM transactions WHERE DATE(created_at) = $1 AND status = 'success'",
-        [today]
-      );
-      stats.successfulPayments = parseInt(successResult.rows[0].count);
+      const successResult = pool.query("SELECT COUNT(*) as count FROM transactions WHERE date(created_at) = ? AND status = 'success'", [today]);
+      stats.successfulPayments = successResult.rows[0]?.count || 0;
 
-      // Pending payments
-      const pendingResult = await pool.query(
-        "SELECT COUNT(*) FROM transactions WHERE status = 'pending'"
-      );
-      stats.pendingPayments = parseInt(pendingResult.rows[0].count);
+      const pendingResult = pool.query("SELECT COUNT(*) as count FROM transactions WHERE status = 'pending'");
+      stats.pendingPayments = pendingResult.rows[0]?.count || 0;
 
-      // Failed payments today
-      const failedResult = await pool.query(
-        "SELECT COUNT(*) FROM transactions WHERE DATE(created_at) = $1 AND status = 'failed'",
-        [today]
-      );
-      stats.failedPayments = parseInt(failedResult.rows[0].count);
+      const failedResult = pool.query("SELECT COUNT(*) as count FROM transactions WHERE date(created_at) = ? AND status = 'failed'", [today]);
+      stats.failedPayments = failedResult.rows[0]?.count || 0;
 
-      // Total revenue
-      const revenueResult = await pool.query(
-        "SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE status = 'success'"
-      );
-      stats.totalRevenue = parseInt(revenueResult.rows[0].total);
+      const revenueResult = pool.query("SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE status = 'success'");
+      stats.totalRevenue = revenueResult.rows[0]?.total || 0;
 
-      // Active subscriptions
-      const subResult = await pool.query(
-        "SELECT COUNT(*) FROM subscriptions WHERE status = 'active'"
-      );
-      stats.activeSubscriptions = parseInt(subResult.rows[0].count);
-
-      // API requests today
-      const apiResult = await pool.query(
-        'SELECT COUNT(*) FROM api_usage WHERE DATE(created_at) = $1',
-        [today]
-      );
-      stats.apiRequestsToday = parseInt(apiResult.rows[0].count);
-
-      // Security events today
-      const securityResult = await pool.query(
-        'SELECT COUNT(*) FROM security_events WHERE DATE(created_at) = $1',
-        [today]
-      );
-      stats.securityEvents = parseInt(securityResult.rows[0].count);
+      const subResult = pool.query("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'active'");
+      stats.activeSubscriptions = subResult.rows[0]?.count || 0;
 
       res.json({ success: true, data: stats });
     } catch (error) {
@@ -96,34 +49,29 @@ const adminController = {
       const search = req.query.search || '';
       const offset = (page - 1) * limit;
 
-      let query = `
-        SELECT u.id, u.email, u.name, u.avatar, u.status, u.last_login, u.created_at,
-               r.name as role_name
-        FROM users u
-        LEFT JOIN roles r ON u.role_id = r.id
-      `;
-      let countQuery = 'SELECT COUNT(*) FROM users u';
+      let query = `SELECT u.id, u.email, u.name, u.avatar, u.status, u.last_login, u.created_at, r.name as role_name FROM users u LEFT JOIN roles r ON u.role_id = r.id`;
+      let countQuery = 'SELECT COUNT(*) as count FROM users u';
       const params = [];
       const countParams = [];
 
       if (search) {
-        query += ` WHERE u.email ILIKE $1 OR u.name ILIKE $1`;
-        countQuery += ` WHERE u.email ILIKE $1 OR u.name ILIKE $1`;
-        params.push(`%${search}%`);
-        countParams.push(`%${search}%`);
+        query += ` WHERE u.email LIKE ? OR u.name LIKE ?`;
+        countQuery += ` WHERE u.email LIKE ? OR u.name LIKE ?`;
+        params.push(`%${search}%`, `%${search}%`);
+        countParams.push(`%${search}%`, `%${search}%`);
       }
 
-      query += ` ORDER BY u.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      query += ` ORDER BY u.created_at DESC LIMIT ? OFFSET ?`;
       params.push(limit, offset);
 
-      const result = await pool.query(query, params);
-      const countResult = await pool.query(countQuery, countParams);
+      const result = pool.query(query, params);
+      const countResult = pool.query(countQuery, countParams);
 
       res.json({
         success: true,
         data: {
           users: result.rows,
-          total: parseInt(countResult.rows[0].count),
+          total: countResult.rows[0]?.count || 0,
           page,
           limit
         }
@@ -150,17 +98,12 @@ const adminController = {
         });
       }
 
-      await pool.query(
-        'UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2',
-        [status, userId]
-      );
+      pool.query('UPDATE users SET status = ?, updated_at = datetime(\'now\') WHERE id = ?', [status, userId]);
 
-      // Audit log
       const action = status === 'banned' ? 'BAN_USER' : status === 'suspended' ? 'SUSPEND_USER' : 'ACTIVATE_USER';
-      await pool.query(
-        `INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address, user_agent)
-         VALUES ($1, $2, $3, 'user', $4, $5, $6, $7)`,
-        [req.user.id, req.user.role_name, action, userId, JSON.stringify({ newStatus: status }), req.ip, req.headers['user-agent']]
+      pool.query(
+        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, ?, 'user', ?, ?, ?)",
+        [req.session.userId, 'ADMIN', action, userId, JSON.stringify({ newStatus: status }), req.ip]
       );
 
       res.json({ success: true, message: `User ${status}` });
@@ -176,7 +119,7 @@ const adminController = {
   // Get resellers
   getResellers: async (req, res) => {
     try {
-      const result = await pool.query(
+      const result = pool.query(
         `SELECT r.*, u.email, u.name, u.status as user_status
          FROM resellers r
          JOIN users u ON r.user_id = u.id
@@ -200,24 +143,16 @@ const adminController = {
       const { status, custom_rate_limit } = req.body;
 
       if (status) {
-        await pool.query(
-          'UPDATE resellers SET status = $1, updated_at = NOW() WHERE id = $2',
-          [status, resellerId]
-        );
+        pool.query('UPDATE resellers SET status = ?, updated_at = datetime(\'now\') WHERE id = ?', [status, resellerId]);
       }
 
       if (custom_rate_limit !== undefined) {
-        await pool.query(
-          'UPDATE resellers SET custom_rate_limit = $1, updated_at = NOW() WHERE id = $2',
-          [custom_rate_limit, resellerId]
-        );
+        pool.query('UPDATE resellers SET custom_rate_limit = ?, updated_at = datetime(\'now\') WHERE id = ?', [custom_rate_limit, resellerId]);
       }
 
-      // Audit log
-      await pool.query(
-        `INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address, user_agent)
-         VALUES ($1, $2, 'UPDATE_RESELLER', 'reseller', $3, $4, $5, $6)`,
-        [req.user.id, req.user.role_name, resellerId, JSON.stringify({ status, custom_rate_limit }), req.ip, req.headers['user-agent']]
+      pool.query(
+        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, 'UPDATE_RESELLER', 'reseller', ?, ?, ?)",
+        [req.session.userId, 'ADMIN', resellerId, JSON.stringify({ status, custom_rate_limit }), req.ip]
       );
 
       res.json({ success: true, message: 'Reseller updated' });
@@ -238,33 +173,29 @@ const adminController = {
       const status = req.query.status;
       const offset = (page - 1) * limit;
 
-      let query = `
-        SELECT t.*, u.email as user_email, u.name as user_name
-        FROM transactions t
-        LEFT JOIN users u ON t.user_id = u.id
-      `;
-      let countQuery = 'SELECT COUNT(*) FROM transactions t';
+      let query = `SELECT t.*, u.email as user_email, u.name as user_name FROM transactions t LEFT JOIN users u ON t.user_id = u.id`;
+      let countQuery = 'SELECT COUNT(*) as count FROM transactions t';
       const params = [];
       const countParams = [];
 
       if (status) {
-        query += ` WHERE t.status = $1`;
-        countQuery += ` WHERE t.status = $1`;
+        query += ` WHERE t.status = ?`;
+        countQuery += ` WHERE t.status = ?`;
         params.push(status);
         countParams.push(status);
       }
 
-      query += ` ORDER BY t.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      query += ` ORDER BY t.created_at DESC LIMIT ? OFFSET ?`;
       params.push(limit, offset);
 
-      const result = await pool.query(query, params);
-      const countResult = await pool.query(countQuery, countParams);
+      const result = pool.query(query, params);
+      const countResult = pool.query(countQuery, countParams);
 
       res.json({
         success: true,
         data: {
           transactions: result.rows,
-          total: parseInt(countResult.rows[0].count),
+          total: countResult.rows[0]?.count || 0,
           page,
           limit
         }
@@ -284,7 +215,7 @@ const adminController = {
       const { userId } = req.params;
       const { plan_slug, custom_rate_limit } = req.body;
 
-      const planResult = await pool.query('SELECT id FROM plans WHERE slug = $1', [plan_slug]);
+      const planResult = pool.query('SELECT id FROM plans WHERE slug = ?', [plan_slug]);
       if (planResult.rows.length === 0) {
         return res.status(400).json({
           success: false,
@@ -292,19 +223,22 @@ const adminController = {
         });
       }
 
-      await pool.query(
-        `INSERT INTO subscriptions (user_id, plan_id, status, started_at, expired_at, custom_rate_limit)
-         VALUES ($1, $2, 'active', NOW(), NOW() + INTERVAL '30 days', $3)
-         ON CONFLICT (user_id) DO UPDATE SET
-         plan_id = $2, status = 'active', started_at = NOW(), expired_at = NOW() + INTERVAL '30 days', custom_rate_limit = $3, updated_at = NOW()`,
-        [userId, planResult.rows[0].id, custom_rate_limit || null]
-      );
+      const existing = pool.query('SELECT id FROM subscriptions WHERE user_id = ?', [userId]);
+      if (existing.rows.length > 0) {
+        pool.query(
+          "UPDATE subscriptions SET plan_id = ?, status = 'active', started_at = datetime('now'), expired_at = datetime('now', '+30 days'), custom_rate_limit = ?, updated_at = datetime('now') WHERE user_id = ?",
+          [planResult.rows[0].id, custom_rate_limit || null, userId]
+        );
+      } else {
+        pool.query(
+          "INSERT INTO subscriptions (user_id, plan_id, status, started_at, expired_at, custom_rate_limit) VALUES (?, ?, 'active', datetime('now'), datetime('now', '+30 days'), ?)",
+          [userId, planResult.rows[0].id, custom_rate_limit || null]
+        );
+      }
 
-      // Audit log
-      await pool.query(
-        `INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address, user_agent)
-         VALUES ($1, $2, 'CHANGE_PLAN', 'user', $3, $4, $5, $6)`,
-        [req.user.id, req.user.role_name, userId, JSON.stringify({ plan_slug, custom_rate_limit }), req.ip, req.headers['user-agent']]
+      pool.query(
+        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, 'CHANGE_PLAN', 'user', ?, ?, ?)",
+        [req.session.userId, 'ADMIN', userId, JSON.stringify({ plan_slug, custom_rate_limit }), req.ip]
       );
 
       res.json({ success: true, message: 'Plan updated' });
@@ -324,22 +258,22 @@ const adminController = {
       const limit = parseInt(req.query.limit) || 50;
       const offset = (page - 1) * limit;
 
-      const result = await pool.query(
+      const result = pool.query(
         `SELECT a.*, u.email as actor_email, u.name as actor_name
          FROM audit_logs a
          LEFT JOIN users u ON a.actor_id = u.id
          ORDER BY a.created_at DESC
-         LIMIT $1 OFFSET $2`,
+         LIMIT ? OFFSET ?`,
         [limit, offset]
       );
 
-      const countResult = await pool.query('SELECT COUNT(*) FROM audit_logs');
+      const countResult = pool.query('SELECT COUNT(*) as count FROM audit_logs');
 
       res.json({
         success: true,
         data: {
           logs: result.rows,
-          total: parseInt(countResult.rows[0].count),
+          total: countResult.rows[0]?.count || 0,
           page,
           limit
         }
@@ -356,7 +290,7 @@ const adminController = {
   // Get plans
   getPlans: async (req, res) => {
     try {
-      const result = await pool.query('SELECT * FROM plans ORDER BY display_order');
+      const result = pool.query('SELECT * FROM plans ORDER BY display_order');
       res.json({ success: true, data: result.rows });
     } catch (error) {
       console.error('Get plans error:', error);
@@ -375,15 +309,14 @@ const adminController = {
 
       const updates = [];
       const values = [];
-      let paramCount = 1;
 
-      if (price !== undefined) { updates.push(`price = $${paramCount}`); values.push(price); paramCount++; }
-      if (daily_limit !== undefined) { updates.push(`daily_limit = $${paramCount}`); values.push(daily_limit); paramCount++; }
-      if (rate_limit !== undefined) { updates.push(`rate_limit = $${paramCount}`); values.push(rate_limit); paramCount++; }
-      if (features !== undefined) { updates.push(`features = $${paramCount}`); values.push(JSON.stringify(features)); paramCount++; }
-      if (badge !== undefined) { updates.push(`badge = $${paramCount}`); values.push(badge); paramCount++; }
-      if (marketing_text !== undefined) { updates.push(`marketing_text = $${paramCount}`); values.push(marketing_text); paramCount++; }
-      if (is_active !== undefined) { updates.push(`is_active = $${paramCount}`); values.push(is_active); paramCount++; }
+      if (price !== undefined) { updates.push('price = ?'); values.push(price); }
+      if (daily_limit !== undefined) { updates.push('daily_limit = ?'); values.push(daily_limit); }
+      if (rate_limit !== undefined) { updates.push('rate_limit = ?'); values.push(rate_limit); }
+      if (features !== undefined) { updates.push('features = ?'); values.push(JSON.stringify(features)); }
+      if (badge !== undefined) { updates.push('badge = ?'); values.push(badge); }
+      if (marketing_text !== undefined) { updates.push('marketing_text = ?'); values.push(marketing_text); }
+      if (is_active !== undefined) { updates.push('is_active = ?'); values.push(is_active ? 1 : 0); }
 
       if (updates.length === 0) {
         return res.status(400).json({
@@ -392,19 +325,12 @@ const adminController = {
         });
       }
 
-      updates.push(`updated_at = NOW()`);
       values.push(planId);
+      pool.query(`UPDATE plans SET ${updates.join(', ')} WHERE id = ?`, values);
 
-      await pool.query(
-        `UPDATE plans SET ${updates.join(', ')} WHERE id = $${paramCount}`,
-        values
-      );
-
-      // Audit log
-      await pool.query(
-        `INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address, user_agent)
-         VALUES ($1, $2, 'UPDATE_PLAN', 'plan', $3, $4, $5, $6)`,
-        [req.user.id, req.user.role_name, planId, JSON.stringify(req.body), req.ip, req.headers['user-agent']]
+      pool.query(
+        "INSERT INTO audit_logs (actor_id, actor_role, action, target_type, target_id, metadata, ip_address) VALUES (?, ?, 'UPDATE_PLAN', 'plan', ?, ?, ?)",
+        [req.session.userId, 'ADMIN', planId, JSON.stringify(req.body), req.ip]
       );
 
       res.json({ success: true, message: 'Plan updated' });

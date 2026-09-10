@@ -1,13 +1,13 @@
 const qrisService = require('../services/qrisService');
 const { pool } = require('../config/database');
-const { incrementDailyCount } = require('../middleware/rateLimiter');
+const { incrementDailyCount, getDailyLimit, getTodayTransactionCount } = require('../middleware/rateLimiter');
 
 const paymentController = {
   // Create QRIS transaction
   createPayment: async (req, res) => {
     try {
       const { amount, description, promo_code } = req.body;
-      const userId = req.user.id;
+      const userId = req.session.userId;
 
       // Validate amount
       if (!amount || isNaN(amount) || amount <= 0 || amount > 100000000) {
@@ -17,15 +17,31 @@ const paymentController = {
         });
       }
 
+      // Check daily limit
+      const dailyLimit = await getDailyLimit(userId);
+      const todayCount = await getTodayTransactionCount(userId);
+      
+      if (todayCount >= dailyLimit) {
+        return res.status(403).json({
+          success: false,
+          error: {
+            code: 'DAILY_LIMIT_EXCEEDED',
+            message: 'Daily transaction limit exceeded',
+            current: todayCount,
+            limit: dailyLimit
+          }
+        });
+      }
+
       // Check promo code if provided
       let discountAmount = 0;
       let promoCodeId = null;
       if (promo_code) {
-        const promoResult = await pool.query(
+        const promoResult = pool.query(
           `SELECT * FROM promo_codes 
-           WHERE code = $1 AND status = 'active'
-           AND (starts_at IS NULL OR starts_at <= NOW())
-           AND (expires_at IS NULL OR expires_at >= NOW())
+           WHERE code = ? AND status = 'active'
+           AND (starts_at IS NULL OR starts_at <= datetime('now'))
+           AND (expires_at IS NULL OR expires_at >= datetime('now'))
            AND (max_usage IS NULL OR used_count < max_usage)`,
           [promo_code.toUpperCase()]
         );
@@ -53,7 +69,7 @@ const paymentController = {
       });
 
       // Call QRIS API
-      const callbackUrl = `${process.env.BACKEND_URL}/api/webhooks/qris`;
+      const callbackUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/webhooks/qris`;
       const qrisResponse = await qrisService.createTransaction({
         userId,
         amount: finalAmount,
@@ -67,17 +83,11 @@ const paymentController = {
         qr_url: qrisResponse.qr_url,
         payment_url: qrisResponse.payment_url,
         total_amount: qrisResponse.total_amount,
-        expired_at: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
+        expired_at: new Date(Date.now() + 15 * 60 * 1000).toISOString()
       });
 
       // Increment daily count
       await incrementDailyCount(userId);
-
-      // Log API usage
-      await pool.query(
-        'INSERT INTO api_usage (user_id, endpoint, method) VALUES ($1, $2, $3)',
-        [userId, '/api/payments/create', 'POST']
-      );
 
       res.json({
         success: true,
@@ -91,7 +101,7 @@ const paymentController = {
           total_amount: qrisResponse.total_amount,
           discount_amount: discountAmount,
           status: 'pending',
-          expired_at: internalTx.expired_at
+          expired_at: new Date(Date.now() + 15 * 60 * 1000).toISOString()
         }
       });
     } catch (error) {
@@ -107,9 +117,8 @@ const paymentController = {
   checkStatus: async (req, res) => {
     try {
       const { transaction_id } = req.params;
-      const userId = req.user.id;
+      const userId = req.session.userId;
 
-      // Get transaction
       const transaction = await qrisService.getTransaction(transaction_id);
       if (!transaction) {
         return res.status(404).json({
@@ -118,8 +127,7 @@ const paymentController = {
         });
       }
 
-      // Check ownership
-      if (transaction.user_id !== userId && req.user.role_name !== 'ADMIN') {
+      if (transaction.user_id !== userId) {
         return res.status(403).json({
           success: false,
           error: { code: 'FORBIDDEN', message: 'Access denied' }
@@ -135,7 +143,7 @@ const paymentController = {
             if (['success', 'expired', 'failed'].includes(newStatus)) {
               await qrisService.updateTransaction(transaction.id, {
                 status: newStatus,
-                paid_at: newStatus === 'success' ? new Date() : null
+                paid_at: newStatus === 'success' ? new Date().toISOString() : null
               });
               transaction.status = newStatus;
             }
@@ -170,7 +178,7 @@ const paymentController = {
   // Get transaction history
   getHistory: async (req, res) => {
     try {
-      const userId = req.user.id;
+      const userId = req.session.userId;
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 20;
 

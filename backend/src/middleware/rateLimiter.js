@@ -1,8 +1,4 @@
-const { createClient } = require('redis');
 const { pool } = require('../config/database');
-
-const redisClient = createClient({ url: process.env.REDIS_URL });
-redisClient.connect().catch(console.error);
 
 // Rate limit configuration per plan
 const RATE_LIMITS = {
@@ -22,15 +18,17 @@ const DAILY_LIMITS = {
   reseller: 2000
 };
 
+// Simple in-memory rate limiting (for serverless)
+const rateLimitStore = new Map();
+
 // Get user's effective rate limit
 async function getUserRateLimit(userId) {
   try {
-    // Check for custom rate limit in subscription
-    const subResult = await pool.query(
+    const subResult = pool.query(
       `SELECT s.custom_rate_limit, p.rate_limit, p.slug as plan_slug
        FROM subscriptions s
        JOIN plans p ON s.plan_id = p.id
-       WHERE s.user_id = $1 AND s.status = 'active'`,
+       WHERE s.user_id = ? AND s.status = 'active'`,
       [userId]
     );
 
@@ -39,13 +37,10 @@ async function getUserRateLimit(userId) {
     }
 
     const sub = subResult.rows[0];
-
-    // Custom rate limit takes priority
     if (sub.custom_rate_limit) {
       return sub.custom_rate_limit;
     }
 
-    // Plan rate limit
     return RATE_LIMITS[sub.plan_slug] || RATE_LIMITS.free;
   } catch (error) {
     console.error('Error getting rate limit:', error);
@@ -56,11 +51,11 @@ async function getUserRateLimit(userId) {
 // Get user's daily transaction limit
 async function getDailyLimit(userId) {
   try {
-    const subResult = await pool.query(
+    const subResult = pool.query(
       `SELECT p.daily_limit, p.slug as plan_slug
        FROM subscriptions s
        JOIN plans p ON s.plan_id = p.id
-       WHERE s.user_id = $1 AND s.status = 'active'`,
+       WHERE s.user_id = ? AND s.status = 'active'`,
       [userId]
     );
 
@@ -79,9 +74,8 @@ async function getDailyLimit(userId) {
 async function getTodayTransactionCount(userId) {
   try {
     const today = new Date().toISOString().split('T')[0];
-    const result = await pool.query(
-      `SELECT transaction_count FROM daily_usage 
-       WHERE user_id = $1 AND date = $2`,
+    const result = pool.query(
+      'SELECT transaction_count FROM daily_usage WHERE user_id = ? AND date = ?',
       [userId, today]
     );
 
@@ -96,13 +90,22 @@ async function getTodayTransactionCount(userId) {
 async function incrementDailyCount(userId) {
   try {
     const today = new Date().toISOString().split('T')[0];
-    await pool.query(
-      `INSERT INTO daily_usage (user_id, date, transaction_count)
-       VALUES ($1, $2, 1)
-       ON CONFLICT (user_id, date)
-       DO UPDATE SET transaction_count = daily_usage.transaction_count + 1`,
+    const existing = pool.query(
+      'SELECT id FROM daily_usage WHERE user_id = ? AND date = ?',
       [userId, today]
     );
+
+    if (existing.rows.length > 0) {
+      pool.query(
+        'UPDATE daily_usage SET transaction_count = transaction_count + 1 WHERE user_id = ? AND date = ?',
+        [userId, today]
+      );
+    } else {
+      pool.query(
+        'INSERT INTO daily_usage (user_id, date, transaction_count) VALUES (?, ?, 1)',
+        [userId, today]
+      );
+    }
   } catch (error) {
     console.error('Error incrementing daily count:', error);
   }
@@ -110,58 +113,59 @@ async function incrementDailyCount(userId) {
 
 // Rate limiting middleware
 const rateLimiter = async (req, res, next) => {
-  if (!req.user) {
+  if (!req.session?.userId) {
     return next();
   }
 
-  const userId = req.user.id;
+  const userId = req.session.userId;
   const rateLimit = await getUserRateLimit(userId);
-  const key = `ratelimit:${userId}`;
-  const windowSeconds = 60; // 1 minute window
+  const key = `${userId}:${Math.floor(Date.now() / 60000)}`;
 
   try {
-    // Get current count
-    const current = await redisClient.get(key);
-    const count = current ? parseInt(current) : 0;
+    const current = rateLimitStore.get(key) || 0;
 
-    if (count >= rateLimit) {
-      const ttl = await redisClient.ttl(key);
-      res.set('Retry-After', ttl);
+    if (current >= rateLimit) {
+      res.set('Retry-After', '60');
       return res.status(429).json({
         success: false,
         error: {
           code: 'RATE_LIMIT_EXCEEDED',
           message: 'Rate limit exceeded',
-          retryAfter: ttl
+          retryAfter: 60
         }
       });
     }
 
-    // Increment count
-    const multi = redisClient.multi();
-    multi.incr(key);
-    multi.expire(key, windowSeconds);
-    await multi.exec();
+    rateLimitStore.set(key, current + 1);
 
-    // Set rate limit headers
+    // Clean old entries
+    if (rateLimitStore.size > 10000) {
+      const now = Math.floor(Date.now() / 60000);
+      for (const [k] of rateLimitStore) {
+        const keyTime = parseInt(k.split(':')[1]);
+        if (now - keyTime > 5) {
+          rateLimitStore.delete(k);
+        }
+      }
+    }
+
     res.set('X-RateLimit-Limit', rateLimit);
-    res.set('X-RateLimit-Remaining', rateLimit - count - 1);
-    res.set('X-RateLimit-Reset', new Date(Date.now() + windowSeconds * 1000).toISOString());
+    res.set('X-RateLimit-Remaining', rateLimit - current - 1);
 
     next();
   } catch (error) {
     console.error('Rate limiter error:', error);
-    next(); // Allow request on error
+    next();
   }
 };
 
 // Daily limit check middleware
 const dailyLimitChecker = async (req, res, next) => {
-  if (!req.user) {
+  if (!req.session?.userId) {
     return next();
   }
 
-  const userId = req.user.id;
+  const userId = req.session.userId;
   const dailyLimit = await getDailyLimit(userId);
   const todayCount = await getTodayTransactionCount(userId);
 

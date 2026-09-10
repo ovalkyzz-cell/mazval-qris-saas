@@ -4,12 +4,12 @@ const chatController = {
   // Get conversations
   getConversations: async (req, res) => {
     try {
-      const result = await pool.query(
+      const result = pool.query(
         `SELECT id, title, created_at, updated_at
          FROM conversations
-         WHERE user_id = $1
+         WHERE user_id = ?
          ORDER BY updated_at DESC`,
-        [req.user.id]
+        [req.session.userId]
       );
 
       res.json({ success: true, data: result.rows });
@@ -25,14 +25,15 @@ const chatController = {
   // Create conversation
   createConversation: async (req, res) => {
     try {
-      const result = await pool.query(
+      const result = pool.query(
         `INSERT INTO conversations (user_id, title)
-         VALUES ($1, $2)
-         RETURNING *`,
-        [req.user.id, req.body.title || 'New Chat']
+         VALUES (?, ?)`,
+        [req.session.userId, req.body.title || 'New Chat']
       );
 
-      res.json({ success: true, data: result.rows[0] });
+      const conv = pool.query('SELECT * FROM conversations WHERE id = ?', [result.rows[0]?.id]);
+
+      res.json({ success: true, data: conv.rows[0] });
     } catch (error) {
       console.error('Create conversation error:', error);
       res.status(500).json({
@@ -47,10 +48,9 @@ const chatController = {
     try {
       const { conversationId } = req.params;
 
-      // Check ownership
-      const convResult = await pool.query(
-        'SELECT * FROM conversations WHERE id = $1 AND user_id = $2',
-        [conversationId, req.user.id]
+      const convResult = pool.query(
+        'SELECT * FROM conversations WHERE id = ? AND user_id = ?',
+        [conversationId, req.session.userId]
       );
 
       if (convResult.rows.length === 0) {
@@ -60,9 +60,9 @@ const chatController = {
         });
       }
 
-      const result = await pool.query(
+      const result = pool.query(
         `SELECT * FROM messages
-         WHERE conversation_id = $1
+         WHERE conversation_id = ?
          ORDER BY created_at ASC`,
         [conversationId]
       );
@@ -83,10 +83,9 @@ const chatController = {
       const { conversationId } = req.params;
       const { content } = req.body;
 
-      // Check ownership
-      const convResult = await pool.query(
-        'SELECT * FROM conversations WHERE id = $1 AND user_id = $2',
-        [conversationId, req.user.id]
+      const convResult = pool.query(
+        'SELECT * FROM conversations WHERE id = ? AND user_id = ?',
+        [conversationId, req.session.userId]
       );
 
       if (convResult.rows.length === 0) {
@@ -97,25 +96,24 @@ const chatController = {
       }
 
       // Save user message
-      await pool.query(
+      pool.query(
         `INSERT INTO messages (conversation_id, role, content)
-         VALUES ($1, 'user', $2)`,
+         VALUES (?, 'user', ?)`,
         [conversationId, content]
       );
 
       // Update conversation timestamp
-      await pool.query(
-        'UPDATE conversations SET updated_at = NOW() WHERE id = $1',
+      pool.query(
+        "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
         [conversationId]
       );
 
-      // Here you would integrate with an AI service
-      // For now, we'll just save a placeholder response
-      const aiResponse = 'AI response placeholder - integrate with your AI service';
+      // AI response placeholder
+      const aiResponse = 'Ini adalah placeholder response. Integrasi dengan AI service untuk response yang sesungguhnya.';
 
-      await pool.query(
+      pool.query(
         `INSERT INTO messages (conversation_id, role, content)
-         VALUES ($1, 'assistant', $2)`,
+         VALUES (?, 'assistant', ?)`,
         [conversationId, aiResponse]
       );
 
@@ -141,12 +139,12 @@ const chatController = {
       const { conversationId } = req.params;
       const { title } = req.body;
 
-      const result = await pool.query(
-        `UPDATE conversations SET title = $1, updated_at = NOW()
-         WHERE id = $2 AND user_id = $3
-         RETURNING *`,
-        [title, conversationId, req.user.id]
+      pool.query(
+        "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+        [title, conversationId, req.session.userId]
       );
+
+      const result = pool.query('SELECT * FROM conversations WHERE id = ?', [conversationId]);
 
       if (result.rows.length === 0) {
         return res.status(404).json({
@@ -170,17 +168,8 @@ const chatController = {
     try {
       const { conversationId } = req.params;
 
-      const result = await pool.query(
-        'DELETE FROM conversations WHERE id = $1 AND user_id = $2 RETURNING id',
-        [conversationId, req.user.id]
-      );
-
-      if (result.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: { code: 'NOT_FOUND', message: 'Conversation not found' }
-        });
-      }
+      pool.query('DELETE FROM messages WHERE conversation_id = ?', [conversationId]);
+      pool.query('DELETE FROM conversations WHERE id = ? AND user_id = ?', [conversationId, req.session.userId]);
 
       res.json({ success: true, message: 'Conversation deleted' });
     } catch (error) {
