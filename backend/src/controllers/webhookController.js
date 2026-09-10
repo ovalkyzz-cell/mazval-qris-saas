@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { pool } = require('../config/database');
 
-const WEBHOOK_SECRET = process.env.QRIS_WEBHOOK_SECRET || 'whsec_3fd18c3175e2ba823656ef5f9cd6f6ca82aaeee9cc1961ce';
+const WEBHOOK_SECRET = process.env.QRIS_WEBHOOK_SECRET;
 
 const webhookController = {
   handleQrisWebhook: async (req, res) => {
