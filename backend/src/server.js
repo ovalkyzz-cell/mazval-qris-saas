@@ -13,8 +13,17 @@ const routes = require('./routes');
 const { errorHandler } = require('./middleware/errorHandler');
 const { securityHeaders } = require('./middleware/security');
 
+const { Pool } = require('pg');
+
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Session PostgreSQL pool (separate from main pool)
+const sessionPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 2,
+});
 
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -29,11 +38,11 @@ app.use(cookieParser());
 
 // Session with PostgreSQL store
 app.use(session({
-  store: new PgSession({ pool, tableName: 'user_sessions' }),
+  store: new PgSession({ pool: sessionPool, tableName: 'user_sessions' }),
   secret: process.env.SESSION_SECRET || 'mazval-secret-key',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: true, httpOnly: true, maxAge: 24 * 60 * 60 * 1000, sameSite: 'none' },
+  cookie: { secure: false, httpOnly: true, maxAge: 24 * 60 * 60 * 1000, sameSite: 'lax' },
   name: 'qris_session'
 }));
 
