@@ -34,6 +34,7 @@ class QrisService {
       return {
         transaction_id: response.data.data.transaction_id,
         qr_url: response.data.data.qr_url,
+        qris_image: response.data.data.qris_image,
         payment_url: response.data.data.payment_url,
         amount: response.data.data.amount,
         total_amount: response.data.data.total_amount,
