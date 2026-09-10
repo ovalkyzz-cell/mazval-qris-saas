@@ -42,6 +42,8 @@ router.get('/setup/migrate', async (req, res) => {
   try {
     const { pool } = require('../config/database');
     
+    await pool.query(`CREATE TABLE IF NOT EXISTS user_sessions (sid VARCHAR NOT NULL COLLATE "default", sess JSONB NOT NULL, expire TIMESTAMP(6) NOT NULL, PRIMARY KEY (sid))`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS IDX_user_sessions_expire ON user_sessions(expire)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS roles (id SERIAL PRIMARY KEY, name VARCHAR(50) UNIQUE NOT NULL, description TEXT, permissions JSONB DEFAULT '[]', created_at TIMESTAMP DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, name VARCHAR(255), password_hash VARCHAR(255), avatar TEXT, google_id VARCHAR(255), role_id INTEGER REFERENCES roles(id), status VARCHAR(20) DEFAULT 'active', last_login TIMESTAMP, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS plans (id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, slug VARCHAR(100) UNIQUE NOT NULL, price INTEGER DEFAULT 0, daily_limit INTEGER DEFAULT 5, rate_limit INTEGER DEFAULT 5, features JSONB DEFAULT '[]', is_active BOOLEAN DEFAULT true, display_order INTEGER DEFAULT 0, badge VARCHAR(50), marketing_text TEXT)`);
@@ -51,6 +53,7 @@ router.get('/setup/migrate', async (req, res) => {
     await pool.query(`CREATE TABLE IF NOT EXISTS promo_codes (id SERIAL PRIMARY KEY, code VARCHAR(50) UNIQUE NOT NULL, type VARCHAR(20) NOT NULL, value INTEGER NOT NULL, max_usage INTEGER, used_count INTEGER DEFAULT 0, status VARCHAR(20) DEFAULT 'active', created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, actor_id INTEGER, actor_role TEXT, action VARCHAR(100) NOT NULL, target_type VARCHAR(50), target_id INTEGER, metadata JSONB, ip_address VARCHAR(45), created_at TIMESTAMP DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS resellers (id SERIAL PRIMARY KEY, user_id INTEGER UNIQUE REFERENCES users(id), business_name VARCHAR(255), status VARCHAR(20) DEFAULT 'pending', custom_rate_limit INTEGER DEFAULT 300, created_at TIMESTAMP DEFAULT NOW())`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS reseller_users (id SERIAL PRIMARY KEY, reseller_id INTEGER REFERENCES resellers(id), user_id INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS conversations (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id), title VARCHAR(255) DEFAULT 'New Chat', created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, conversation_id INTEGER REFERENCES conversations(id), role VARCHAR(20) NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW())`);
 
